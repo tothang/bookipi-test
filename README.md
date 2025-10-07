@@ -42,6 +42,8 @@ flowchart LR
   - Base: http://localhost:3000
   - Docs: http://localhost:3000/api/docs
 
+- Front End local: http://localhost:3001
+
 - Client calls POST `/api/v1/sale/purchase`
 - API acquires per-user-per-product Redis lock (SET NX PX)
 - Reads Redis inventory, validates sale window and prior purchase
