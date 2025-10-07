@@ -4,46 +4,13 @@ A high-throughput flash sale backend using Redis for hot-path inventory and lock
 
 ## System Diagram
 ```mermaid
-%%{init: {'theme': 'neutral', 'themeVariables': { 'fontSize': '14px' }}}%%
 flowchart LR
-  %% Clients
-  subgraph Clients
-    C[Client (Web/Mobile)]
-    A[Admin]
-  end
-
-  %% API Layer
-  subgraph API[API (NestJS)]
-    G[AuthGuard]
-    S[SaleService]
-  end
-
-  %% Infrastructure
-  subgraph Infra[Infrastructure]
-    R[(Redis)]
-    DB[(PostgreSQL)]
-  end
-
-  %% Entry routes
-  C -->|GET /sale/status| S
+  C[Client Web/Mobile] -->|GET /sale/status| S(SaleService)
   C -->|POST /sale/purchase| S
-  A -->|POST /admin/products| S
+  A[Admin] -->|POST /admin/products| S
 
-  %% Guards and core
-  G -. protects .-> S
-
-  %% Hot path (inventory & locks)
-  S -->|ioredis| R
-  R -. Inventory (DECR/INCR) .-> S
-
-  %% Persistence
-  S -->|TypeORM Txn| DB
-
-  %% Initialization
-  S -->|Initialize inventory if missing| R
-
-  classDef hot fill:#e3f2fd,stroke:#42a5f5,color:#0d47a1;
-  class R hot
+  S -->|ioredis| R[(Redis)]
+  S -->|TypeORM Txn| DB[(PostgreSQL)]
 ```
 
 ## Setup
