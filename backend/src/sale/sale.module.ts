@@ -7,6 +7,8 @@ import { Order } from './entities/order.entity';
 import { RedisModule } from '@nestjs-modules/ioredis';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { BullModule } from '@nestjs/bull';
+import { SalesProcessor } from './sales.processor';
 
 @Module({
   imports: [
@@ -24,9 +26,22 @@ import { ScheduleModule } from '@nestjs/schedule';
       inject: [ConfigService],
     }),
     ScheduleModule.forRoot(),
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      useFactory: (configService: ConfigService) => ({
+        redis: {
+          host: configService.get('redis.host') || 'localhost',
+          port: configService.get('redis.port') || 6379,
+        },
+      }),
+      inject: [ConfigService],
+    }),
+    BullModule.registerQueue({
+      name: 'sales',
+    }),
   ],
   controllers: [SaleController],
-  providers: [SaleService],
+  providers: [SaleService, SalesProcessor],
   exports: [SaleService],
 })
 export class SaleModule {}

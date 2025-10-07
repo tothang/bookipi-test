@@ -24,17 +24,18 @@ const ioredis_1 = require("@nestjs-modules/ioredis");
 const ioredis_2 = require("ioredis");
 const uuid_1 = require("uuid");
 const product_entity_2 = require("./entities/product.entity");
+const bull_1 = require("@nestjs/bull");
 let SaleService = SaleService_1 = class SaleService {
-    constructor(productRepository, orderRepository, dataSource, redisClient) {
+    constructor(productRepository, orderRepository, dataSource, redisClient, salesQueue) {
         this.productRepository = productRepository;
         this.orderRepository = orderRepository;
         this.dataSource = dataSource;
         this.redisClient = redisClient;
+        this.salesQueue = salesQueue;
         this.logger = new common_1.Logger(SaleService_1.name);
         this.PURCHASE_LOCK_PREFIX = 'purchase_lock:';
         this.PRODUCT_INVENTORY_PREFIX = 'product_inventory:';
         this.USER_PURCHASE_PREFIX = 'user_purchase:';
-        this.SALE_STATUS_KEY = 'sale_status';
     }
     async initializeProduct(productId) {
         const product = await this.productRepository.findOne({ where: { id: productId } });
@@ -101,13 +102,12 @@ let SaleService = SaleService_1 = class SaleService {
                 userId,
                 quantity: 1,
                 price: product.price,
-                status: order_entity_1.OrderStatus.COMPLETED,
                 metadata,
                 completedAt: new Date(),
             });
             await queryRunner.manager.save(order);
             await queryRunner.commitTransaction();
-            this.updateProductSoldQuantity(productId, 1).catch((err) => this.logger.error(`Failed to update sold quantity: ${err.message}`, err.stack));
+            await this.salesQueue.add('incrementSold', { productId, increment: 1 }, { attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
             return {
                 orderId: order.id,
                 productId: order.productId,
@@ -232,9 +232,10 @@ exports.SaleService = SaleService = SaleService_1 = __decorate([
     __param(0, (0, typeorm_1.InjectRepository)(product_entity_1.Product)),
     __param(1, (0, typeorm_1.InjectRepository)(order_entity_1.Order)),
     __param(3, (0, ioredis_1.InjectRedis)()),
+    __param(4, (0, bull_1.InjectQueue)('sales')),
     __metadata("design:paramtypes", [typeorm_2.Repository,
         typeorm_2.Repository,
         typeorm_2.DataSource,
-        ioredis_2.Redis])
+        ioredis_2.Redis, Object])
 ], SaleService);
 //# sourceMappingURL=sale.service.js.map

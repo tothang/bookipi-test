@@ -16,6 +16,8 @@ const order_entity_1 = require("./entities/order.entity");
 const ioredis_1 = require("@nestjs-modules/ioredis");
 const config_1 = require("@nestjs/config");
 const schedule_1 = require("@nestjs/schedule");
+const bull_1 = require("@nestjs/bull");
+const sales_processor_1 = require("./sales.processor");
 let SaleModule = class SaleModule {
 };
 exports.SaleModule = SaleModule;
@@ -36,9 +38,22 @@ exports.SaleModule = SaleModule = __decorate([
                 inject: [config_1.ConfigService],
             }),
             schedule_1.ScheduleModule.forRoot(),
+            bull_1.BullModule.forRootAsync({
+                imports: [config_1.ConfigModule],
+                useFactory: (configService) => ({
+                    redis: {
+                        host: configService.get('redis.host') || 'localhost',
+                        port: configService.get('redis.port') || 6379,
+                    },
+                }),
+                inject: [config_1.ConfigService],
+            }),
+            bull_1.BullModule.registerQueue({
+                name: 'sales',
+            }),
         ],
         controllers: [sale_controller_1.SaleController],
-        providers: [sale_service_1.SaleService],
+        providers: [sale_service_1.SaleService, sales_processor_1.SalesProcessor],
         exports: [sale_service_1.SaleService],
     })
 ], SaleModule);

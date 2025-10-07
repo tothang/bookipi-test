@@ -11,6 +11,11 @@ flowchart LR
 
   S -->|ioredis| R[(Redis)]
   S -->|TypeORM Txn| DB[(PostgreSQL)]
+
+  %% Queue for post-commit updates
+  S -- enqueue incrementSold --> Q((Bull Queue))
+  Q -- consume --> P[SalesProcessor]
+  P -- update soldQuantity --> DB
 ```
 
 ## Setup
@@ -40,15 +45,45 @@ flowchart LR
 - Releases lock
 
 ## Tradeoffs
-- Redis as hot source for inventory
-  - Pros: O(1) atomic ops, high throughput, low DB contention
-  - Cons: Needs sync logic when product totals change
-- Per-user lock
-  - Pros: Prevents duplicate concurrent buys
-  - Cons: TTL tuning and lock management complexity
-- Eventual consistency on `soldQuantity`
-  - Pros: Faster checkout path
-  - Cons: Requires reconciliation on failures
+  1. Performance vs Consistency
+
+  Redis as the primary fast path for inventory
+
+  Pros: Ultra-low latency (O(1) atomic operations), supports thousands of concurrent requests per second, minimal database contention.
+
+  Cons: Introduces eventual consistency — Redis and PostgreSQL may temporarily diverge, requiring background reconciliation or compensation jobs.
+
+  2. Latency vs Reliability
+
+  Asynchronous writes to PostgreSQL
+
+  Pros: Users receive instant feedback after Redis confirmation; the database write can happen asynchronously or batched in the background.
+
+  Cons: Adds complexity — needs retry logic, deduplication, and idempotent transaction handling to prevent data loss in case of worker or queue failures.
+
+  3. Simplicity vs Scalability
+
+  Redis + PostgreSQL hybrid design
+
+  Pros: Enables horizontal scalability and handles high traffic with low latency.
+
+  Cons: Increases system complexity — requires queue management, worker processes, and monitoring for sync drift or rollback failures.
+
+  4. Strong vs Eventual Consistency
+
+  Eventual consistency on soldQuantity
+
+  Pros: Faster checkout experience; Redis handles real-time decrements while PostgreSQL confirms asynchronously.
+
+  Cons: Temporary mismatch possible between Redis cache and persistent database state until synchronization completes.
+
+  5. Cost vs Reliability
+
+  Distributed caching and background processing
+
+  Pros: Offloads expensive write operations from PostgreSQL, improving throughput and stability under heavy load.
+
+  Cons: Higher operational cost — additional Redis cluster, message queue, and worker infrastructure to maintain.
 
 - **Run k6**
   ```bash

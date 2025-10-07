@@ -10,6 +10,8 @@ import { InjectRedis } from '@nestjs-modules/ioredis';
 import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { SaleStatus } from './entities/product.entity';
+import { InjectQueue } from '@nestjs/bull';
+import { Queue } from 'bull';
 
 @Injectable()
 export class SaleService {
@@ -17,7 +19,6 @@ export class SaleService {
   private readonly PURCHASE_LOCK_PREFIX = 'purchase_lock:';
   private readonly PRODUCT_INVENTORY_PREFIX = 'product_inventory:';
   private readonly USER_PURCHASE_PREFIX = 'user_purchase:';
-  private readonly SALE_STATUS_KEY = 'sale_status';
 
   constructor(
     @InjectRepository(Product)
@@ -27,6 +28,7 @@ export class SaleService {
     private readonly dataSource: DataSource,
     @InjectRedis()
     private readonly redisClient: Redis,
+    @InjectQueue('sales') private readonly salesQueue: Queue,
   ) {}
 
   // Initialize product and inventory in Redis
@@ -39,14 +41,12 @@ export class SaleService {
     const redisClient = this.redisClient;
     const inventoryKey = this.getInventoryKey(productId);
     
-    // Set initial inventory if not exists
     const exists = await redisClient.exists(inventoryKey);
     if (!exists) {
       await redisClient.set(inventoryKey, product.getRemainingQuantity());
     }
   }
 
-  // Get product with inventory
   async getProductWithInventory(productId: string): Promise<{
     product: Product;
     availableQuantity: number;
@@ -68,7 +68,6 @@ export class SaleService {
     };
   }
 
-  // Process purchase with distributed locking
   async processPurchase(
     purchaseDto: PurchaseProductDto,
   ): Promise<PurchaseResponseDto> {
@@ -88,7 +87,6 @@ export class SaleService {
       await queryRunner.connect();
       await queryRunner.startTransaction();
 
-      // Check product availability
       const { product, availableQuantity } = await this.getProductWithInventory(productId);
       
       if (availableQuantity <= 0) {
@@ -99,7 +97,6 @@ export class SaleService {
         throw new BadRequestException('Sale is not active');
       }
 
-      // Check if user already purchased
       const existingOrder = await this.orderRepository.findOne({
         where: {
           productId,
@@ -120,13 +117,11 @@ export class SaleService {
         throw new BadRequestException('Insufficient inventory');
       }
 
-      // Create order
       const order = this.orderRepository.create({
         productId,
         userId,
         quantity: 1,
         price: product.price,
-        status: OrderStatus.COMPLETED,
         metadata,
         completedAt: new Date(),
       });
@@ -134,9 +129,11 @@ export class SaleService {
       await queryRunner.manager.save(order);
       await queryRunner.commitTransaction();
 
-      // Update product sold quantity asynchronously
-      this.updateProductSoldQuantity(productId, 1).catch((err) =>
-        this.logger.error(`Failed to update sold quantity: ${err.message}`, err.stack),
+      // Enqueue background job to increment sold quantity with retries (post-commit)
+      await this.salesQueue.add(
+        'incrementSold',
+        { productId, increment: 1 },
+        { attempts: 5, backoff: { type: 'exponential', delay: 2000 } },
       );
 
       return {
@@ -159,7 +156,6 @@ export class SaleService {
     }
   }
 
-  // Create a new product
   async createProduct(createProductDto: CreateProductDto): Promise<Product> {
     const product = this.productRepository.create({
       ...createProductDto,
@@ -170,7 +166,6 @@ export class SaleService {
     return this.productRepository.save(product);
   }
 
-  // Get user's purchase status
   async getUserPurchaseStatus(
     productId: string,
     userId: string,
@@ -189,7 +184,6 @@ export class SaleService {
     };
   }
 
-  // Update sale status based on current time
   @Cron(CronExpression.EVERY_MINUTE)
   async updateSaleStatus(): Promise<void> {
     const now = new Date();
@@ -264,7 +258,7 @@ export class SaleService {
     return this.redisClient.incrby(key, quantity);
   }
 
-  private async updateProductSoldQuantity(
+  async updateProductSoldQuantity(
     productId: string,
     increment: number,
   ): Promise<void> {
