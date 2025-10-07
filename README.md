@@ -31,6 +31,13 @@ flowchart LR
   cp .env.example .env
   npm run start:dev
   ```
+
+- Front end:
+  ```bash
+  cd frontend
+  npm install
+  npm run start
+  ```
 - API:
   - Base: http://localhost:3000
   - Docs: http://localhost:3000/api/docs
