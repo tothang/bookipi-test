@@ -71,61 +71,61 @@ let SaleService = SaleService_1 = class SaleService {
         if (!lockAcquired) {
             throw new Error('Unable to acquire lock for purchase');
         }
-        const queryRunner = this.dataSource.createQueryRunner();
         try {
-            await queryRunner.connect();
-            await queryRunner.startTransaction();
             const { product, availableQuantity } = await this.getProductWithInventory(productId);
             if (availableQuantity <= 0) {
-                throw new common_1.BadRequestException('Product is out of stock');
+                this.logger.warn(`Out of stock for product ${productId}`);
+                return { error: 'Product is out of stock' };
             }
             if (!product.isSaleActive()) {
-                throw new common_1.BadRequestException('Sale is not active');
+                this.logger.warn(`Sale not active for product ${productId}`);
+                return { error: 'Sale is not active' };
+            }
+            const userPurchaseKey = this.getUserPurchaseKey(productId, userId);
+            const existingMarker = await this.redisClient.get(userPurchaseKey);
+            if (existingMarker) {
+                this.logger.warn(`Duplicate purchase attempt (marker) for user ${userId} product ${productId}`);
+                return { error: 'You have already purchased this item' };
             }
             const existingOrder = await this.orderRepository.findOne({
-                where: {
-                    productId,
-                    userId,
-                    status: order_entity_1.OrderStatus.COMPLETED,
-                },
+                where: { productId, userId, status: order_entity_1.OrderStatus.COMPLETED },
             });
             if (existingOrder) {
-                throw new common_1.BadRequestException('You have already purchased this item');
+                this.logger.warn(`Duplicate purchase attempt (db) for user ${userId} product ${productId}`);
+                return { error: 'You have already purchased this item' };
             }
             const newQuantity = await this.decrementInventory(productId, 1);
             if (newQuantity < 0) {
                 await this.incrementInventory(productId, 1);
                 throw new common_1.BadRequestException('Insufficient inventory');
             }
-            const order = this.orderRepository.create({
+            const orderId = (0, uuid_1.v4)();
+            const setMarker = await this.redisClient.set(userPurchaseKey, orderId, 'NX');
+            if (setMarker !== 'OK') {
+                await this.incrementInventory(productId, 1);
+                throw new common_1.BadRequestException('You have already purchased this item');
+            }
+            await this.salesQueue.add('persistOrder', {
+                orderId,
                 productId,
                 userId,
                 quantity: 1,
                 price: product.price,
                 metadata,
-                completedAt: new Date(),
-            });
-            await queryRunner.manager.save(order);
-            await queryRunner.commitTransaction();
-            await this.salesQueue.add('incrementSold', { productId, increment: 1 }, { attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+                completedAt: new Date().toISOString(),
+            }, { jobId: orderId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
             return {
-                orderId: order.id,
-                productId: order.productId,
-                userId: order.userId,
-                quantity: order.quantity,
-                price: order.price,
-                total: order.price * order.quantity,
-                status: order.status,
-                purchasedAt: order.completedAt,
+                orderId,
+                productId,
+                userId,
+                quantity: 1,
+                price: product.price,
+                total: product.price * 1,
+                status: order_entity_1.OrderStatus.COMPLETED,
+                purchasedAt: new Date(),
             };
         }
-        catch (error) {
-            await queryRunner.rollbackTransaction();
-            this.logger.error(`Purchase failed: ${error.message}`, error.stack);
-            throw error;
-        }
         finally {
-            await queryRunner.release();
             await this.releaseLock(lockKey, lockValue);
         }
     }
@@ -138,17 +138,19 @@ let SaleService = SaleService_1 = class SaleService {
         return this.productRepository.save(product);
     }
     async getUserPurchaseStatus(productId, userId) {
+        const markerKey = this.getUserPurchaseKey(productId, userId);
+        const markerOrderId = await this.redisClient.get(markerKey);
+        if (markerOrderId) {
+            const byId = await this.orderRepository.findOne({ where: { id: markerOrderId } });
+            if (byId) {
+                return { hasPurchased: true, order: byId };
+            }
+            return { hasPurchased: true };
+        }
         const order = await this.orderRepository.findOne({
-            where: {
-                productId,
-                userId,
-                status: order_entity_1.OrderStatus.COMPLETED,
-            },
+            where: { productId, userId, status: order_entity_1.OrderStatus.COMPLETED },
         });
-        return {
-            hasPurchased: !!order,
-            order: order || undefined,
-        };
+        return { hasPurchased: !!order, order: order || undefined };
     }
     async updateSaleStatus() {
         const now = new Date();
@@ -194,8 +196,14 @@ let SaleService = SaleService_1 = class SaleService {
         }
     }
     async getAvailableQuantity(productId) {
-        const result = await this.redisClient.get(this.getInventoryKey(productId));
-        return result ? parseInt(result, 10) : 0;
+        const key = this.getInventoryKey(productId);
+        const cached = await this.redisClient.get(key);
+        if (cached !== null) {
+            return parseInt(cached, 10);
+        }
+        await this.initializeProduct(productId);
+        const seeded = await this.redisClient.get(key);
+        return seeded ? parseInt(seeded, 10) : 0;
     }
     async decrementInventory(productId, quantity) {
         const key = this.getInventoryKey(productId);
@@ -207,6 +215,39 @@ let SaleService = SaleService_1 = class SaleService {
     }
     async updateProductSoldQuantity(productId, increment) {
         await this.productRepository.increment({ id: productId }, 'soldQuantity', increment);
+    }
+    async persistOrderTransactional(payload) {
+        const { orderId, productId, userId, quantity, price, metadata, completedAt } = payload;
+        const queryRunner = this.dataSource.createQueryRunner();
+        await queryRunner.connect();
+        await queryRunner.startTransaction();
+        try {
+            const dup = await this.orderRepository.findOne({ where: { productId, userId, status: order_entity_1.OrderStatus.COMPLETED } });
+            if (dup) {
+                await queryRunner.commitTransaction();
+                return;
+            }
+            const order = this.orderRepository.create({
+                id: orderId,
+                productId,
+                userId,
+                quantity,
+                price,
+                metadata,
+                status: order_entity_1.OrderStatus.COMPLETED,
+                completedAt: new Date(completedAt),
+            });
+            await queryRunner.manager.save(order);
+            await queryRunner.commitTransaction();
+            await this.salesQueue.add('incrementSold', { productId, increment: quantity }, { attempts: 5, backoff: { type: 'exponential', delay: 2000 } });
+        }
+        catch (e) {
+            await queryRunner.rollbackTransaction();
+            throw e;
+        }
+        finally {
+            await queryRunner.release();
+        }
     }
     async getFirstProductWithInventory() {
         const [product] = await this.productRepository.find({

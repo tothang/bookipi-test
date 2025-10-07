@@ -49,6 +49,7 @@ async function bootstrap() {
     const saleService = app.get(SaleService);
     const productRepo = dataSource.getRepository(Product);
     const existingCount = await productRepo.count();
+    console.log(existingCount);
 
     if (existingCount === 0) {
       const now = new Date();
@@ -74,6 +75,24 @@ async function bootstrap() {
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn('[Seed] Skipped seeding on startup:', (e as any)?.message || e);
+  }
+
+  // Warm-up job: ensure Redis inventory is initialized for ACTIVE/UPCOMING products
+  try {
+    const dataSource = app.get(DataSource);
+    const saleService = app.get(SaleService);
+    const productRepo = dataSource.getRepository(Product);
+
+    const all = await productRepo.find();
+    const candidates = all.filter(
+      (p) => p.status === SaleStatus.ACTIVE || p.status === SaleStatus.UPCOMING,
+    );
+    await Promise.all(candidates.map((p) => saleService.initializeProduct(p.id)));
+    // eslint-disable-next-line no-console
+    console.log(`[Warmup] Initialized Redis inventory for ${candidates.length} products`);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn('[Warmup] Skipped inventory warm-up:', (e as any)?.message || e);
   }
 
   await app.listen(port);

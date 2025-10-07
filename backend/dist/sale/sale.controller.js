@@ -86,6 +86,9 @@ let SaleController = SaleController_1 = class SaleController {
                 },
             };
             const result = await this.saleService.processPurchase(purchaseWithMetadata);
+            if (result?.error) {
+                return { success: false, error: result.error };
+            }
             return { success: true, data: result };
         }
         catch (error) {

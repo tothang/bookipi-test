@@ -39,6 +39,15 @@ export declare class SaleService {
     private decrementInventory;
     private incrementInventory;
     updateProductSoldQuantity(productId: string, increment: number): Promise<void>;
+    persistOrderTransactional(payload: {
+        orderId: string;
+        productId: string;
+        userId: string;
+        quantity: number;
+        price: number;
+        metadata: Record<string, any>;
+        completedAt: string;
+    }): Promise<void>;
     getFirstProductWithInventory(): Promise<{
         product: Product;
         availableQuantity: number;

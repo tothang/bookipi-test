@@ -84,6 +84,12 @@ __decorate([
     __metadata("design:type", Date)
 ], Order.prototype, "cancelledAt", void 0);
 exports.Order = Order = __decorate([
-    (0, typeorm_1.Entity)('orders')
+    (0, typeorm_1.Entity)('orders'),
+    (0, typeorm_1.Check)('chk_order_quantity_positive', '"quantity" > 0'),
+    (0, typeorm_1.Check)('chk_order_price_nonneg', '"price" >= 0'),
+    (0, typeorm_1.Index)('uniq_completed_order_per_user_product', ['userId', 'productId'], {
+        unique: true,
+        where: '"status" = \'' + OrderStatus.COMPLETED + '\'',
+    })
 ], Order);
 //# sourceMappingURL=order.entity.js.map

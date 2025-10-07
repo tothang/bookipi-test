@@ -35,12 +35,12 @@ export declare class SaleController {
     }>;
     purchaseProduct(purchaseDto: PurchaseProductDto, user: any, req: Request): Promise<{
         success: boolean;
-        data: PurchaseResponseDto;
-        error?: undefined;
-    } | {
-        success: boolean;
         error: any;
         data?: undefined;
+    } | {
+        success: boolean;
+        data: PurchaseResponseDto;
+        error?: undefined;
     }>;
     getUserPurchaseStatus(productId: string, user: any): Promise<{
         success: boolean;

@@ -51,12 +51,20 @@ export interface UserPurchaseStatus {
 
 export const getProductStatus = async (productId: string): Promise<ProductStatus> => {
   const response = await apiClient.get(`/sale/status/${productId}`);
-  return response.data.data;
+  const { success, data, error } = response.data || {};
+  if (success === false) {
+    throw new Error(error || 'Failed to load product status');
+  }
+  return data;
 };
 
 export const getFirstProductStatus = async (): Promise<ProductStatus> => {
   const response = await apiClient.get(`/sale/first`);
-  return response.data.data;
+  const { success, data, error } = response.data || {};
+  if (success === false) {
+    throw new Error(error || 'Failed to load product');
+  }
+  return data;
 };
 
 export const purchaseProduct = async (
@@ -68,7 +76,11 @@ export const purchaseProduct = async (
       'x-user-id': userId,
     },
   });
-  return response.data.data;
+  const { success, data, error } = response.data || {};
+  if (success === false) {
+    throw new Error(error || 'Purchase failed');
+  }
+  return data;
 };
 
 export const getUserPurchaseStatus = async (
@@ -80,7 +92,11 @@ export const getUserPurchaseStatus = async (
       'x-user-id': userId,
     },
   });
-  return response.data.data;
+  const { success, data, error } = response.data || {};
+  if (success === false) {
+    throw new Error(error || 'Failed to load user status');
+  }
+  return data;
 };
 
 export const createProduct = async (productData: any): Promise<any> => {

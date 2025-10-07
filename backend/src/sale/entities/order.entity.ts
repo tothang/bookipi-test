@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn, Check, Index } from 'typeorm';
 import { Product } from './product.entity';
 
 export enum OrderStatus {
@@ -9,6 +9,13 @@ export enum OrderStatus {
 }
 
 @Entity('orders')
+@Check('chk_order_quantity_positive', '"quantity" > 0')
+@Check('chk_order_price_nonneg', '"price" >= 0')
+@Index('uniq_completed_order_per_user_product', ['userId', 'productId'], {
+  unique: true,
+  // Partial unique index to prevent duplicate COMPLETED orders for same user/product
+  where: '"status" = \'' + OrderStatus.COMPLETED + '\'',
+})
 export class Order {
   @PrimaryGeneratedColumn('uuid')
   id: string;

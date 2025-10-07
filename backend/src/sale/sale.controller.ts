@@ -99,9 +99,11 @@ export class SaleController {
         },
       };
       const result = await this.saleService.processPurchase(purchaseWithMetadata);
+      if ((result as any)?.error) {
+        return { success: false, error: (result as any).error };
+      }
       return { success: true, data: result };
     } catch (error) {
-      // Log and return a graceful failure instead of throwing
       this.logger.error(`Purchase failed: ${error.message}`, error.stack);
       return {
         success: false,

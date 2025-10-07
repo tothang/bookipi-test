@@ -74,84 +74,81 @@ export class SaleService {
     const { productId, userId, metadata = {} } = purchaseDto;
     const lockKey = this.getPurchaseLockKey(productId, userId);
     const lockValue = uuidv4();
-    
     // Use Redis lock to prevent concurrent purchases
     const lockAcquired = await this.acquireLock(lockKey, lockValue);
     if (!lockAcquired) {
       throw new Error('Unable to acquire lock for purchase');
     }
 
-    const queryRunner = this.dataSource.createQueryRunner();
-    
     try {
-      await queryRunner.connect();
-      await queryRunner.startTransaction();
-
+      // Validate product and availability (reads Postgres + Redis with cache-aside)
       const { product, availableQuantity } = await this.getProductWithInventory(productId);
-      
       if (availableQuantity <= 0) {
-        throw new BadRequestException('Product is out of stock');
+        this.logger.warn(`Out of stock for product ${productId}`);
+        return { error: 'Product is out of stock' } as any;
       }
-
       if (!product.isSaleActive()) {
-        throw new BadRequestException('Sale is not active');
+        this.logger.warn(`Sale not active for product ${productId}`);
+        return { error: 'Sale is not active' } as any;
       }
 
+      // Fast-path duplicate prevention via Redis marker
+      const userPurchaseKey = this.getUserPurchaseKey(productId, userId);
+      const existingMarker = await this.redisClient.get(userPurchaseKey);
+      if (existingMarker) {
+        this.logger.warn(`Duplicate purchase attempt (marker) for user ${userId} product ${productId}`);
+        return { error: 'You have already purchased this item' } as any;
+      }
+
+      // Final guard via Postgres (cheap read)
       const existingOrder = await this.orderRepository.findOne({
-        where: {
-          productId,
-          userId,
-          status: OrderStatus.COMPLETED,
-        },
+        where: { productId, userId, status: OrderStatus.COMPLETED },
       });
-
       if (existingOrder) {
-        throw new BadRequestException('You have already purchased this item');
+        this.logger.warn(`Duplicate purchase attempt (db) for user ${userId} product ${productId}`);
+        return { error: 'You have already purchased this item' } as any;
       }
 
-      // Decrement inventory
+      // Reserve inventory in Redis
       const newQuantity = await this.decrementInventory(productId, 1);
       if (newQuantity < 0) {
-        // Rollback inventory if we went negative (shouldn't happen due to lock)
         await this.incrementInventory(productId, 1);
         throw new BadRequestException('Insufficient inventory');
       }
 
-      const order = this.orderRepository.create({
+      // Set idempotency marker and enqueue DB write
+      const orderId = uuidv4();
+      const setMarker = await this.redisClient.set(userPurchaseKey, orderId, 'NX');
+      if (setMarker !== 'OK') {
+        await this.incrementInventory(productId, 1);
+        throw new BadRequestException('You have already purchased this item');
+      }
+
+      await this.salesQueue.add(
+        'persistOrder',
+        {
+          orderId,
+          productId,
+          userId,
+          quantity: 1,
+          price: product.price,
+          metadata,
+          completedAt: new Date().toISOString(),
+        },
+        { jobId: orderId, attempts: 5, backoff: { type: 'exponential', delay: 2000 } },
+      );
+
+      return {
+        orderId,
         productId,
         userId,
         quantity: 1,
         price: product.price,
-        metadata,
-        completedAt: new Date(),
-      });
-
-      await queryRunner.manager.save(order);
-      await queryRunner.commitTransaction();
-
-      // Enqueue background job to increment sold quantity with retries (post-commit)
-      await this.salesQueue.add(
-        'incrementSold',
-        { productId, increment: 1 },
-        { attempts: 5, backoff: { type: 'exponential', delay: 2000 } },
-      );
-
-      return {
-        orderId: order.id,
-        productId: order.productId,
-        userId: order.userId,
-        quantity: order.quantity,
-        price: order.price,
-        total: order.price * order.quantity,
-        status: order.status,
-        purchasedAt: order.completedAt,
+        total: product.price * 1,
+        status: OrderStatus.COMPLETED,
+        purchasedAt: new Date(),
       };
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      this.logger.error(`Purchase failed: ${error.message}`, error.stack);
-      throw error;
     } finally {
-      await queryRunner.release();
       await this.releaseLock(lockKey, lockValue);
     }
   }
@@ -170,18 +167,25 @@ export class SaleService {
     productId: string,
     userId: string,
   ): Promise<{ hasPurchased: boolean; order?: Order }> {
-    const order = await this.orderRepository.findOne({
-      where: {
-        productId,
-        userId,
-        status: OrderStatus.COMPLETED,
-      },
-    });
+    // 1) Check Redis marker first (fast path, covers in-flight queued orders)
+    const markerKey = this.getUserPurchaseKey(productId, userId);
+    const markerOrderId = await this.redisClient.get(markerKey);
 
-    return {
-      hasPurchased: !!order,
-      order: order || undefined,
-    };
+    if (markerOrderId) {
+      // Try to load the exact order by id if it has been persisted already
+      const byId = await this.orderRepository.findOne({ where: { id: markerOrderId } });
+      if (byId) {
+        return { hasPurchased: true, order: byId };
+      }
+      // Not yet persisted, but reserved via Redis marker
+      return { hasPurchased: true };
+    }
+
+    // 2) Fallback to Postgres check (completed orders)
+    const order = await this.orderRepository.findOne({
+      where: { productId, userId, status: OrderStatus.COMPLETED },
+    });
+    return { hasPurchased: !!order, order: order || undefined };
   }
 
   @Cron(CronExpression.EVERY_MINUTE)
@@ -244,8 +248,15 @@ export class SaleService {
   }
 
   private async getAvailableQuantity(productId: string): Promise<number> {
-    const result = await this.redisClient.get(this.getInventoryKey(productId));
-    return result ? parseInt(result, 10) : 0;
+    const key = this.getInventoryKey(productId);
+    const cached = await this.redisClient.get(key);
+    if (cached !== null) {
+      return parseInt(cached, 10);
+    }
+    // Cache-aside: seed from Postgres if missing in Redis, then re-read
+    await this.initializeProduct(productId);
+    const seeded = await this.redisClient.get(key);
+    return seeded ? parseInt(seeded, 10) : 0;
   }
 
   private async decrementInventory(productId: string, quantity: number): Promise<number> {
@@ -269,7 +280,54 @@ export class SaleService {
     );
   }
 
-  // Get the most recently created product with its current inventory
+  // Called by worker: create order in Postgres within a transaction, then enqueue incrementSold
+  async persistOrderTransactional(payload: {
+    orderId: string;
+    productId: string;
+    userId: string;
+    quantity: number;
+    price: number;
+    metadata: Record<string, any>;
+    completedAt: string;
+  }): Promise<void> {
+    const { orderId, productId, userId, quantity, price, metadata, completedAt } = payload;
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+    try {
+      // Idempotency: if order already exists and completed, exit
+      const dup = await this.orderRepository.findOne({ where: { productId, userId, status: OrderStatus.COMPLETED } });
+      if (dup) {
+        await queryRunner.commitTransaction();
+        return;
+      }
+
+      const order = this.orderRepository.create({
+        id: orderId,
+        productId,
+        userId,
+        quantity,
+        price,
+        metadata,
+        status: OrderStatus.COMPLETED,
+        completedAt: new Date(completedAt),
+      });
+      await queryRunner.manager.save(order);
+      await queryRunner.commitTransaction();
+
+      await this.salesQueue.add(
+        'incrementSold',
+        { productId, increment: quantity },
+        { attempts: 5, backoff: { type: 'exponential', delay: 2000 } },
+      );
+    } catch (e) {
+      await queryRunner.rollbackTransaction();
+      throw e;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
   async getFirstProductWithInventory(): Promise<{
     product: Product;
     availableQuantity: number;

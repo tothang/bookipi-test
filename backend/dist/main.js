@@ -37,6 +37,7 @@ async function bootstrap() {
         const saleService = app.get(sale_service_1.SaleService);
         const productRepo = dataSource.getRepository(product_entity_1.Product);
         const existingCount = await productRepo.count();
+        console.log(existingCount);
         if (existingCount === 0) {
             const now = new Date();
             const ends = new Date(now.getTime() + 2 * 60 * 60 * 1000);
@@ -57,6 +58,18 @@ async function bootstrap() {
     }
     catch (e) {
         console.warn('[Seed] Skipped seeding on startup:', e?.message || e);
+    }
+    try {
+        const dataSource = app.get(typeorm_1.DataSource);
+        const saleService = app.get(sale_service_1.SaleService);
+        const productRepo = dataSource.getRepository(product_entity_1.Product);
+        const all = await productRepo.find();
+        const candidates = all.filter((p) => p.status === product_entity_1.SaleStatus.ACTIVE || p.status === product_entity_1.SaleStatus.UPCOMING);
+        await Promise.all(candidates.map((p) => saleService.initializeProduct(p.id)));
+        console.log(`[Warmup] Initialized Redis inventory for ${candidates.length} products`);
+    }
+    catch (e) {
+        console.warn('[Warmup] Skipped inventory warm-up:', e?.message || e);
     }
     await app.listen(port);
     console.log(`Application is running on: http://localhost:${port}`);
